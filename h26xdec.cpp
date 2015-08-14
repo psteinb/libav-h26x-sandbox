@@ -12,31 +12,6 @@ extern "C"
 #include <libswscale/swscale.h>
 };
 
-void saveFrame(const AVFrame* frame, int width, int height, int frameNumber, const std::string& _frame_base)
-{
-
-    std::stringstream oname;
-    oname << _frame_base << "-slice" << frameNumber << ".ppm";
-
-    std::ofstream file(oname.str().c_str(),
-		       std::ios_base::binary |
-		       std::ios_base::trunc |
-		       std::ios_base::out);
-
-    if (!file.good())
-    {
-        throw std::runtime_error("Unable to open the file to write the frame");
-    }
-
-    file << "P5\n" << width << '\n' << height << "\n255\n";
-
-    for (int i = 0; i < height; ++i)
-    {
-        file.write((char*)(frame->data[0] + i * frame->linesize[0]), width);
-    }
-
-    file.close();
-}
 
 int main(int argc, char **argv)
 {

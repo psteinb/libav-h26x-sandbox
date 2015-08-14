@@ -13,7 +13,13 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/mathematics.h>
 #include <libavutil/samplefmt.h>
+#include <libavformat/avformat.h>
+#include <libswscale/swscale.h>
+  #include "av_format_extend.h"
 }
+
+#include "utils.hpp"
+
 #define INBUF_SIZE 4096
 
 static const uint32_t WIDTH = 352;
@@ -342,6 +348,268 @@ static void video_encode_to_buffer(std::vector<uint8_t>& _buffer, AVCodecID code
     printf("\n");
 }
 
+int decode_buffer_to_files(const std::vector<uint8_t>& _buffer, const std::string& _fbase){
+
+    av_register_all();
+    AVFrame* frame = avcodec_alloc_frame();
+    if (!frame)
+    {
+        return 1;
+    }
+
+    AVFormatContext* formatContext = NULL;
+    formatContext = avformat_alloc_context();//TODO: handle errors!!
+
+    //taken from https://ffmpeg.org/doxygen/trunk/avio_reading_8c-example.html#a18
+    AVIOContext *avio_ctx = NULL;
+    uint8_t *avio_ctx_buffer = NULL;
+    size_t avio_ctx_buffer_size = 4096;
+
+    
+    buffer_data read_data = {0};
+    read_data.ptr = &_buffer[0];
+    read_data.size = _buffer.size();
+      
+    avio_ctx_buffer = (uint8_t *)av_malloc(avio_ctx_buffer_size);
+    if (!avio_ctx_buffer) {
+      std::cerr << "failed to allocated avio_ctx_buffer\n";
+      //handle deallocation
+      avformat_close_input(&formatContext);
+      av_freep(&avio_ctx_buffer);
+      return 1;
+    }
+    
+    avio_ctx = avio_alloc_context(avio_ctx_buffer, avio_ctx_buffer_size,
+                                  0, &read_data, &read_packet, NULL, NULL);
+    if (!avio_ctx) {
+      
+      std::cerr << "failed to allocated avio_ctx_buffer\n";
+      //handle deallocation
+      avformat_close_input(&formatContext);
+      return 1;
+      
+    }
+    formatContext->pb = avio_ctx;
+    
+    if (avformat_open_input(&formatContext, "", NULL, NULL) != 0)
+    {
+      avformat_close_input(&formatContext);
+      if (avio_ctx) {
+        av_freep(&avio_ctx->buffer);
+        av_freep(&avio_ctx);
+      }
+      av_free(frame);
+      return 1;
+    }
+
+    if (avformat_find_stream_info(formatContext, NULL) < 0)
+    {
+        av_free(frame);
+        avformat_close_input(&formatContext);
+	if (avio_ctx) {
+	  av_freep(&avio_ctx->buffer);
+	  av_freep(&avio_ctx);
+	}
+        return 1;
+    }
+
+    if (formatContext->nb_streams < 1 ||
+        formatContext->streams[0]->codec->codec_type != AVMEDIA_TYPE_VIDEO)
+    {
+        av_free(frame);
+        avformat_close_input(&formatContext);
+	if (avio_ctx) {
+	  av_freep(&avio_ctx->buffer);
+	  av_freep(&avio_ctx);
+	}
+        return 1;
+    }
+
+    AVStream* stream = formatContext->streams[0];
+    AVCodecContext* codecContext = stream->codec;
+
+    codecContext->codec = avcodec_find_decoder(codecContext->codec_id);
+    if (codecContext->codec == NULL)
+    {
+        av_free(frame);
+        avcodec_close(codecContext);
+        avformat_close_input(&formatContext);
+	if (avio_ctx) {
+	  av_freep(&avio_ctx->buffer);
+	  av_freep(&avio_ctx);
+	}
+        return 1;
+    }
+    else if (avcodec_open2(codecContext, codecContext->codec, NULL) != 0)
+    {
+        av_free(frame);
+        avcodec_close(codecContext);
+        avformat_close_input(&formatContext);
+	if (avio_ctx) {
+	  av_freep(&avio_ctx->buffer);
+	  av_freep(&avio_ctx);
+	}
+        return 1;
+    }
+
+    AVPacket packet;
+    av_init_packet(&packet);
+
+
+
+    int frameNumber = 0;
+    while (av_read_frame(formatContext, &packet) == 0)
+    {
+        if (packet.stream_index == stream->index)
+        {
+            int frameFinished = 0;
+            avcodec_decode_video2(codecContext, frame, &frameFinished, &packet);
+
+            if (frameFinished)
+            {
+	      saveFrame(frame, codecContext->width, codecContext->height, frameNumber++,_fbase.c_str());
+                std::cout << frameNumber << ":\trepeat: " << frame->repeat_pict
+                      << "\tkeyframe: " << frame->key_frame
+                      << "\tbest_ts: " << frame->best_effort_timestamp << '\n';
+            }
+        }
+    }
+
+
+    int frameFinished = 1;
+    while(frameFinished){
+
+      packet.data = NULL;
+      packet.size = 0;
+      int rcode = avcodec_decode_video2(codecContext, frame, &frameFinished, &packet);
+      if(rcode < 0 ){
+	std::cerr << "[delayed]\tdecide error detected\n";
+	break;
+      }
+      
+      if (frameFinished)
+	{
+	  saveFrame(frame, codecContext->width, codecContext->height, frameNumber++,_fbase.c_str());
+	  std::cout << frameNumber << ":\trepeat: " << frame->repeat_pict
+		<< "\tkeyframe: " << frame->key_frame
+		<< "\tbest_ts: " << frame->best_effort_timestamp << "[delayed]\n";
+	}
+    }
+    
+    av_free_packet(&packet);
+    av_free(frame);
+    avcodec_close(codecContext);
+    avformat_close_input(&formatContext);
+    if (avio_ctx) {
+	  av_freep(&avio_ctx->buffer);
+	  av_freep(&avio_ctx);
+	}
+    return 0;
+
+}
+
+int decode_video_file(const std::string& _fname)
+{
+    av_register_all();
+    AVFrame* frame = avcodec_alloc_frame();
+    if (!frame)
+    {
+        return 1;
+    }
+
+    AVFormatContext* formatContext = NULL;
+    if (avformat_open_input(&formatContext, _fname.c_str(), NULL, NULL) != 0)
+    {
+        av_free(frame);
+        return 1;
+    }
+
+    if (avformat_find_stream_info(formatContext, NULL) < 0)
+    {
+        av_free(frame);
+        avformat_close_input(&formatContext);
+        return 1;
+    }
+
+    if (formatContext->nb_streams < 1 ||
+        formatContext->streams[0]->codec->codec_type != AVMEDIA_TYPE_VIDEO)
+    {
+        av_free(frame);
+        avformat_close_input(&formatContext);
+        return 1;
+    }
+
+    AVStream* stream = formatContext->streams[0];
+    AVCodecContext* codecContext = stream->codec;
+
+    codecContext->codec = avcodec_find_decoder(codecContext->codec_id);
+    if (codecContext->codec == NULL)
+    {
+        av_free(frame);
+        avcodec_close(codecContext);
+        avformat_close_input(&formatContext);
+        return 1;
+    }
+    else if (avcodec_open2(codecContext, codecContext->codec, NULL) != 0)
+    {
+        av_free(frame);
+        avcodec_close(codecContext);
+        avformat_close_input(&formatContext);
+        return 1;
+    }
+
+    AVPacket packet;
+    av_init_packet(&packet);
+
+
+
+    int frameNumber = 0;
+    while (av_read_frame(formatContext, &packet) == 0)
+    {
+        if (packet.stream_index == stream->index)
+        {
+            int frameFinished = 0;
+            avcodec_decode_video2(codecContext, frame, &frameFinished, &packet);
+
+            if (frameFinished)
+            {
+	      saveFrame(frame, codecContext->width, codecContext->height, frameNumber++,_fname.c_str());
+                std::cout << frameNumber << ":\trepeat: " << frame->repeat_pict
+                      << "\tkeyframe: " << frame->key_frame
+                      << "\tbest_ts: " << frame->best_effort_timestamp << '\n';
+            }
+        }
+    }
+
+
+    int frameFinished = 1;
+    while(frameFinished){
+
+      packet.data = NULL;
+      packet.size = 0;
+      int rcode = avcodec_decode_video2(codecContext, frame, &frameFinished, &packet);
+      if(rcode < 0 ){
+	std::cerr << "[delayed]\tdecide error detected\n";
+	break;
+      }
+      
+      if (frameFinished)
+	{
+	  saveFrame(frame, codecContext->width, codecContext->height, frameNumber++,_fname.c_str());
+	  std::cout << frameNumber << ":\trepeat: " << frame->repeat_pict
+		<< "\tkeyframe: " << frame->key_frame
+		<< "\tbest_ts: " << frame->best_effort_timestamp << "[delayed]\n";
+	}
+    }
+    
+    av_free_packet(&packet);
+    av_free(frame);
+    avcodec_close(codecContext);
+    avformat_close_input(&formatContext);
+    return 0;
+}
+
+
 int main(int argc, char **argv)
 {
 
@@ -377,15 +645,32 @@ int main(int argc, char **argv)
       
     }
 
-    //video_encode_example(oname.c_str(), codec_id);
+    //that works!
+    video_encode_example(oname.c_str(), codec_id);
+    decode_video_file(oname);
 
     std::vector<uint8_t> fbuffer;
-    std::string buffered = "buffered-";
-    buffered += oname;
-    video_encode_to_buffer(fbuffer, codec_id);
-    std::ofstream ofile(buffered, std::ios::binary | std::ios::out | std::ios::trunc );
-    ofile.write(reinterpret_cast<const char*>(&fbuffer[0]),fbuffer.size());
-    ofile.close();
+    std::ifstream ifile(oname, std::ios::binary | std::ios::in );
+    std::stringstream buffer;
+    buffer << ifile.rdbuf();
+    std::string content = buffer.str();
+    std::copy(content.begin(), content.end(),std::back_inserter(fbuffer));
+    ifile.close();
+    std::cerr << "(re-)read "<< fbuffer.size() <<"B from "<< oname <<"\n";
+    
+    //TODO: that needs to work!
+    std::string buffered_name = "buffered-";
+    buffered_name += oname;
+    if(!decode_buffer_to_files(fbuffer,buffered_name))
+      std::cerr << "decode_buffer_to_files failed\n";
+    
+    
+    // std::string buffered = "buffered-";
+    // buffered += oname;
+    // video_encode_to_buffer(fbuffer, codec_id);
+    // std::ofstream ofile(buffered, std::ios::binary | std::ios::out | std::ios::trunc );
+    // ofile.write(reinterpret_cast<const char*>(&fbuffer[0]),fbuffer.size());
+    // ofile.close();
 
     
 
