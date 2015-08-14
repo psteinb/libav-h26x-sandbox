@@ -9,7 +9,7 @@ FFMPEG_LIBS=    libavdevice                        \
 
 CFLAGS += -Wall -g
 CFLAGS := $(shell pkg-config --cflags $(FFMPEG_LIBS)) $(CFLAGS)
-CXXFLAGS := $(CFLAGS)
+CXXFLAGS := $(CFLAGS) -std=c++11
 LDLIBS := $(shell pkg-config --libs $(FFMPEG_LIBS)) $(LDLIBS)
 
 EXAMPLES=  h265enc h26xdec h264enc dump_yuv				   
@@ -23,6 +23,9 @@ all:  $(EXAMPLES)
 h264enc:           LDLIBS += -lm
 h265enc:           LDLIBS += -lm 
 h26xdec: h26xdec.cpp
+	$(CXX) $< -lm $(CXXFLAGS) $(LDLIBS) -o $@
+
+roundtrip : roundtrip.cpp
 	$(CXX) $< -lm $(CXXFLAGS) $(LDLIBS) -o $@
 
 clean-test:
